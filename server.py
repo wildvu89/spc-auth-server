@@ -88,7 +88,27 @@ def init_db():
 
 init_db()
 
-# Models
+# ── Keep-alive: ping self every 14 min so Render free tier never sleeps ──
+import threading
+import urllib.request as _urllib_req
+
+def _keep_alive():
+    import time
+    port = os.environ.get("PORT", "8000")
+    url  = f"http://0.0.0.0:{port}/health"
+    # Also ping the public URL if available
+    public_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    while True:
+        time.sleep(14 * 60)   # 14 minutes
+        for target in ([url] + ([public_url + "/health"] if public_url else [])):
+            try:
+                _urllib_req.urlopen(target, timeout=10)
+            except Exception:
+                pass
+
+threading.Thread(target=_keep_alive, daemon=True).start()
+
+
 class RegisterRequest(BaseModel):
     name: str
     email: str
@@ -177,7 +197,12 @@ Vui lòng không chia sẻ để bảo mật dữ liệu cá nhân"""
             f.write(f"\n--- MAIL FAILED SMTP: {time.strftime('%Y-%m-%d %H:%M:%S')} to {to_email} ---\n{body}\n---------------------------------------\n")
         return False
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
 @app.post("/api/auth/register")
+
 def register(req: RegisterRequest):
     username = req.username.strip().lower()
     email = req.email.strip().lower()
