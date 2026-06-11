@@ -9,9 +9,28 @@ import urllib.request as _urllib_req
 from email.mime.text import MIMEText
 from email.header import Header
 from typing import Optional
-from fastapi import FastAPI, HTTPException, Header as RequestHeader, Query
+from fastapi import FastAPI, HTTPException, Header as RequestHeader, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import hashlib
+import re
+
+# Password hashing helpers
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+def is_sha256(s: str) -> bool:
+    return bool(re.match(r'^[0-9a-f]{64}$', s))
+
+def verify_password(stored: str, input_val: str) -> bool:
+    if is_sha256(stored):
+        return stored == hash_password(input_val)
+    else:
+        # Backward compatibility for plain text passwords
+        return stored == input_val
+
+# Rate limiting for forgot password
+forgot_password_rate_limit = {}
 
 app = FastAPI(title="SPC Central Auth Server")
 
@@ -139,13 +158,14 @@ def init_db():
         cur.execute(q("SELECT COUNT(*) as cnt FROM users WHERE username = ?"), ("admin",))
         count = cur.fetchone()["cnt"]
         if count == 0:
+            hashed_admin_pass = hash_password(admin_pass)
             cur.execute(
                 q("""INSERT INTO users (name, email, username, password, referral_code, is_admin, status)
                      VALUES (?, ?, ?, ?, ?, 1, 'active')"""),
-                ("Administrator", "admin@spc.com", "admin", admin_pass, "ADMIN")
+                ("Administrator", "admin@spc.com", "admin", hashed_admin_pass, "ADMIN")
             )
             conn.commit()
-            print(f"[*] Admin account seeded (username: admin, password: {admin_pass})")
+            print(f"[*] Admin account seeded (username: admin, password: {admin_pass} [HASHED])")
         else:
             cur.execute(q("UPDATE users SET status = 'active' WHERE username = ?"), ("admin",))
             conn.commit()
@@ -188,6 +208,10 @@ class LoginRequest(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     identity: str
+
+class ListUsersRequest(BaseModel):
+    admin_user: str
+    admin_pass: str
 
 class ResetDeviceRequest(BaseModel):
     admin_user: str
@@ -282,9 +306,10 @@ def register(req: RegisterRequest):
         if cur.fetchone():
             raise HTTPException(status_code=400, detail="Gmail này đã được đăng ký tài khoản.")
 
+        hashed_pwd = hash_password(req.password)
         cur.execute(
             q("INSERT INTO users (name, email, username, password, referral_code, is_admin, status) VALUES (?, ?, ?, ?, ?, 0, 'pending')"),
-            (name, email, username, req.password, referral_code)
+            (name, email, username, hashed_pwd, referral_code)
         )
         conn.commit()
     finally:
@@ -303,8 +328,18 @@ def login(req: LoginRequest):
     try:
         cur.execute(q("SELECT * FROM users WHERE username = ?"), (username,))
         user = cur.fetchone()
-        if not user or row_get(user, "password") != req.password:
+        if not user or not verify_password(row_get(user, "password"), req.password):
             raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không chính xác.")
+
+        # Auto-migrate legacy plain text password to hashed format
+        stored_pwd = row_get(user, "password")
+        if not is_sha256(stored_pwd):
+            hashed_pwd = hash_password(req.password)
+            cur.execute(
+                q("UPDATE users SET password = ? WHERE id = ?"),
+                (hashed_pwd, row_get(user, "id"))
+            )
+            conn.commit()
 
         user_id  = row_get(user, "id")
         is_admin = bool(row_get(user, "is_admin", 0))
@@ -350,8 +385,21 @@ def login(req: LoginRequest):
 
 
 @app.post("/api/auth/forgot_password")
-def forgot_password(req: ForgotPasswordRequest):
+def forgot_password(req: ForgotPasswordRequest, request: Request):
     identity = req.identity.strip().lower()
+    client_ip = request.client.host if request.client else "unknown"
+
+    now = time.time()
+    cooldown = 60.0
+    for key in (identity, client_ip):
+        if key in forgot_password_rate_limit:
+            last_time = forgot_password_rate_limit[key]
+            if now - last_time < cooldown:
+                remaining = int(cooldown - (now - last_time))
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Vui lòng đợi {remaining} giây trước khi gửi lại yêu cầu cấp lại mật khẩu."
+                )
 
     conn = get_db_connection()
     cur  = get_cursor(conn)
@@ -361,8 +409,13 @@ def forgot_password(req: ForgotPasswordRequest):
         if not user:
             raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản tương ứng với thông tin đã nhập.")
 
+        # Rate limit verified user
+        forgot_password_rate_limit[identity] = now
+        forgot_password_rate_limit[client_ip] = now
+
         new_password = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(8))
-        cur.execute(q("UPDATE users SET password = ? WHERE id = ?"), (new_password, row_get(user, "id")))
+        hashed_new_pwd = hash_password(new_password)
+        cur.execute(q("UPDATE users SET password = ? WHERE id = ?"), (hashed_new_pwd, row_get(user, "id")))
         conn.commit()
 
         sent = send_password_reset_email(row_get(user, "email"), new_password)
@@ -375,13 +428,14 @@ def forgot_password(req: ForgotPasswordRequest):
     return {"status": "ok", "message": "Mật khẩu mới đã được gửi về Gmail của bạn thành công!"}
 
 
-@app.get("/api/admin/users")
-def admin_list_users(admin_user: str = Query(...), admin_pass: str = Query(...)):
+@app.post("/api/admin/users")
+def admin_list_users(req: ListUsersRequest):
     conn = get_db_connection()
     cur  = get_cursor(conn)
     try:
-        cur.execute(q("SELECT id FROM users WHERE username = ? AND password = ? AND is_admin = 1"), (admin_user, admin_pass))
-        if not cur.fetchone():
+        cur.execute(q("SELECT password FROM users WHERE username = ? AND is_admin = 1"), (req.admin_user,))
+        admin = cur.fetchone()
+        if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
         cur.execute("SELECT * FROM users")
@@ -396,7 +450,7 @@ def admin_list_users(admin_user: str = Query(...), admin_pass: str = Query(...))
                 "name":          row_get(u, "name"),
                 "email":         row_get(u, "email"),
                 "username":      row_get(u, "username"),
-                "password":      row_get(u, "password"),
+                "password":      "********",
                 "referral_code": row_get(u, "referral_code"),
                 "is_admin":      bool(row_get(u, "is_admin", 0)),
                 "status":        row_get(u, "status", "pending"),
@@ -415,8 +469,9 @@ def admin_reset_device(req: ResetDeviceRequest):
     conn = get_db_connection()
     cur  = get_cursor(conn)
     try:
-        cur.execute(q("SELECT id FROM users WHERE username = ? AND password = ? AND is_admin = 1"), (req.admin_user, req.admin_pass))
-        if not cur.fetchone():
+        cur.execute(q("SELECT password FROM users WHERE username = ? AND is_admin = 1"), (req.admin_user,))
+        admin = cur.fetchone()
+        if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
         cur.execute(q("SELECT id FROM users WHERE username = ?"), (req.target_username,))
@@ -441,8 +496,9 @@ def admin_delete_user(req: DeleteUserRequest):
     conn = get_db_connection()
     cur  = get_cursor(conn)
     try:
-        cur.execute(q("SELECT id FROM users WHERE username = ? AND password = ? AND is_admin = 1"), (req.admin_user, req.admin_pass))
-        if not cur.fetchone():
+        cur.execute(q("SELECT password FROM users WHERE username = ? AND is_admin = 1"), (req.admin_user,))
+        admin = cur.fetchone()
+        if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
         cur.execute(q("SELECT id FROM users WHERE username = ?"), (req.target_username,))
@@ -469,8 +525,9 @@ def admin_activate_user(req: ActivateUserRequest):
     conn = get_db_connection()
     cur  = get_cursor(conn)
     try:
-        cur.execute(q("SELECT id FROM users WHERE username = ? AND password = ? AND is_admin = 1"), (req.admin_user, req.admin_pass))
-        if not cur.fetchone():
+        cur.execute(q("SELECT password FROM users WHERE username = ? AND is_admin = 1"), (req.admin_user,))
+        admin = cur.fetchone()
+        if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
         cur.execute(q("UPDATE users SET status = ? WHERE username = ?"), (req.status, req.target_username))
@@ -491,8 +548,9 @@ def admin_set_expiry(req: SetExpiryRequest):
     conn = get_db_connection()
     cur  = get_cursor(conn)
     try:
-        cur.execute(q("SELECT id FROM users WHERE username = ? AND password = ? AND is_admin = 1"), (req.admin_user, req.admin_pass))
-        if not cur.fetchone():
+        cur.execute(q("SELECT password FROM users WHERE username = ? AND is_admin = 1"), (req.admin_user,))
+        admin = cur.fetchone()
+        if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
         if req.duration_days <= 0:
