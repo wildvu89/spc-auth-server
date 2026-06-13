@@ -249,6 +249,12 @@ class SetExpiryRequest(BaseModel):
     target_username: str
     duration_days: int
 
+class ChangePasswordRequest(BaseModel):
+    admin_user: str
+    admin_pass: str
+    target_username: str
+    new_password: str
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def send_password_reset_email(to_email: str, new_password: str) -> bool:
@@ -584,3 +590,27 @@ def admin_set_expiry(req: SetExpiryRequest):
         conn.close()
 
     return {"status": "ok", "message": msg}
+
+
+@app.post("/api/admin/change_password")
+def admin_change_password(req: ChangePasswordRequest):
+    if req.target_username == "admin":
+        raise HTTPException(status_code=400, detail="Không thể đổi mật khẩu Admin hệ thống từ đây.")
+
+    conn = get_db_connection()
+    cur  = get_cursor(conn)
+    try:
+        cur.execute(q("SELECT password FROM users WHERE username = ? AND is_admin = 1"), (req.admin_user,))
+        admin = cur.fetchone()
+        if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
+            raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
+
+        hashed_pwd = hash_password(req.new_password)
+        cur.execute(q("UPDATE users SET password = ? WHERE username = ?"), (hashed_pwd, req.target_username))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"status": "ok", "message": f"Đã đổi mật khẩu của tài khoản '{req.target_username}' thành công."}
+
