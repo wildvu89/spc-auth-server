@@ -108,15 +108,17 @@ def init_db():
                 selected_package TEXT DEFAULT NULL
             )
             """)
-            for col_sql in [
-                "ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'",
-                "ALTER TABLE users ADD COLUMN expiry_date DOUBLE PRECISION DEFAULT NULL",
-                "ALTER TABLE users ADD COLUMN selected_package TEXT DEFAULT NULL",
-            ]:
-                try:
-                    cur.execute(col_sql)
-                except Exception:
-                    pass
+            
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'users'")
+            existing_cols = {row['column_name'] for row in cur.fetchall()}
+            
+            if 'status' not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'")
+            if 'expiry_date' not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN expiry_date DOUBLE PRECISION DEFAULT NULL")
+            if 'selected_package' not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN selected_package TEXT DEFAULT NULL")
+
             cur.execute("""
             CREATE TABLE IF NOT EXISTS devices (
                 id          SERIAL PRIMARY KEY,
@@ -142,15 +144,17 @@ def init_db():
                 selected_package TEXT DEFAULT NULL
             )
             """)
-            for col_sql in [
-                "ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'",
-                "ALTER TABLE users ADD COLUMN expiry_date REAL DEFAULT NULL",
-                "ALTER TABLE users ADD COLUMN selected_package TEXT DEFAULT NULL",
-            ]:
-                try:
-                    cur.execute(col_sql)
-                except Exception:
-                    pass
+            
+            cur.execute("PRAGMA table_info(users)")
+            existing_cols = {row['name'] for row in cur.fetchall()}
+            
+            if 'status' not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'")
+            if 'expiry_date' not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN expiry_date REAL DEFAULT NULL")
+            if 'selected_package' not in existing_cols:
+                cur.execute("ALTER TABLE users ADD COLUMN selected_package TEXT DEFAULT NULL")
+
             cur.execute("""
             CREATE TABLE IF NOT EXISTS devices (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
