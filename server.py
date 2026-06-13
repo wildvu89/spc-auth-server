@@ -3,6 +3,7 @@ import sys
 import time
 import random
 import string
+import secrets
 import smtplib
 import threading
 import urllib.request as _urllib_req
@@ -103,9 +104,19 @@ def init_db():
                 referral_code  TEXT NOT NULL,
                 is_admin       INTEGER DEFAULT 0,
                 status         TEXT DEFAULT 'pending',
-                expiry_date    DOUBLE PRECISION DEFAULT NULL
+                expiry_date    DOUBLE PRECISION DEFAULT NULL,
+                selected_package TEXT DEFAULT NULL
             )
             """)
+            for col_sql in [
+                "ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'",
+                "ALTER TABLE users ADD COLUMN expiry_date DOUBLE PRECISION DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN selected_package TEXT DEFAULT NULL",
+            ]:
+                try:
+                    cur.execute(col_sql)
+                except Exception:
+                    pass
             cur.execute("""
             CREATE TABLE IF NOT EXISTS devices (
                 id          SERIAL PRIMARY KEY,
@@ -127,12 +138,14 @@ def init_db():
                 password      TEXT NOT NULL,
                 referral_code TEXT NOT NULL,
                 is_admin      INTEGER DEFAULT 0,
-                status        TEXT DEFAULT 'pending'
+                status        TEXT DEFAULT 'pending',
+                selected_package TEXT DEFAULT NULL
             )
             """)
             for col_sql in [
                 "ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'",
                 "ALTER TABLE users ADD COLUMN expiry_date REAL DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN selected_package TEXT DEFAULT NULL",
             ]:
                 try:
                     cur.execute(col_sql)
@@ -197,6 +210,7 @@ class RegisterRequest(BaseModel):
     username: str
     password: str
     referral_code: str
+    selected_package: str = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -308,8 +322,8 @@ def register(req: RegisterRequest):
 
         hashed_pwd = hash_password(req.password)
         cur.execute(
-            q("INSERT INTO users (name, email, username, password, referral_code, is_admin, status) VALUES (?, ?, ?, ?, ?, 0, 'pending')"),
-            (name, email, username, hashed_pwd, referral_code)
+            q("INSERT INTO users (name, email, username, password, referral_code, is_admin, status, selected_package) VALUES (?, ?, ?, ?, ?, 0, 'pending', ?)"),
+            (name, email, username, hashed_pwd, referral_code, req.selected_package)
         )
         conn.commit()
     finally:
@@ -413,7 +427,7 @@ def forgot_password(req: ForgotPasswordRequest, request: Request):
         forgot_password_rate_limit[identity] = now
         forgot_password_rate_limit[client_ip] = now
 
-        new_password = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(8))
+        new_password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
         hashed_new_pwd = hash_password(new_password)
         cur.execute(q("UPDATE users SET password = ? WHERE id = ?"), (hashed_new_pwd, row_get(user, "id")))
         conn.commit()
@@ -447,15 +461,16 @@ def admin_list_users(req: ListUsersRequest):
             devices = cur.fetchall()
             dev_list = [{"uuid": row_get(d,"uuid"), "cpu": row_get(d,"cpu"), "ram": row_get(d,"ram"), "ip": row_get(d,"ip"), "last_login": row_get(d,"last_login")} for d in devices]
             user_list.append({
-                "name":          row_get(u, "name"),
-                "email":         row_get(u, "email"),
-                "username":      row_get(u, "username"),
-                "password":      "********",
-                "referral_code": row_get(u, "referral_code"),
-                "is_admin":      bool(row_get(u, "is_admin", 0)),
-                "status":        row_get(u, "status", "pending"),
-                "expiry_date":   row_get(u, "expiry_date"),
-                "devices":       dev_list,
+                "name":             row_get(u, "name"),
+                "email":            row_get(u, "email"),
+                "username":         row_get(u, "username"),
+                "password":         "********",
+                "referral_code":    row_get(u, "referral_code"),
+                "is_admin":         bool(row_get(u, "is_admin", 0)),
+                "status":           row_get(u, "status", "pending"),
+                "expiry_date":      row_get(u, "expiry_date"),
+                "selected_package": row_get(u, "selected_package"),
+                "devices":          dev_list,
             })
     finally:
         cur.close()
