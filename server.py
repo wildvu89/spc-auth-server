@@ -302,6 +302,11 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/api/auth/version")
+def get_version():
+    return {"version": "V03.04-updated"}
+
+
 @app.post("/api/auth/register")
 def register(req: RegisterRequest):
     username      = req.username.strip().lower()
