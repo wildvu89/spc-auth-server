@@ -259,6 +259,11 @@ class ChangePasswordRequest(BaseModel):
     target_username: str
     new_password: str
 
+class UserChangePasswordRequest(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def send_password_reset_email(to_email: str, new_password: str) -> bool:
@@ -649,4 +654,27 @@ def admin_change_password(req: ChangePasswordRequest):
         conn.close()
 
     return {"status": "ok", "message": f"Đã đổi mật khẩu của tài khoản '{req.target_username}' thành công."}
+
+
+@app.post("/api/auth/change_password")
+def user_change_password(req: UserChangePasswordRequest):
+    username = req.username.strip().lower()
+    if username == "admin":
+        raise HTTPException(status_code=400, detail="Không thể đổi mật khẩu tài khoản Admin từ đây.")
+
+    conn = get_db_connection()
+    cur  = get_cursor(conn)
+    try:
+        cur.execute(q("SELECT * FROM users WHERE username = ?"), (username,))
+        user = cur.fetchone()
+        if not user or not verify_password(row_get(user, "password"), req.old_password):
+            raise HTTPException(status_code=401, detail="Mật khẩu cũ không chính xác.")
+
+        cur.execute(q("UPDATE users SET password = ? WHERE username = ?"), (req.new_password, username))
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+    return {"status": "ok", "message": "Đổi mật khẩu thành công!"}
 
