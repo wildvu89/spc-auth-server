@@ -301,13 +301,13 @@ def register(req: RegisterRequest):
     username      = req.username.strip().lower()
     email         = req.email.strip().lower()
     name          = req.name.strip()
-    referral_code = req.referral_code.strip()
+    referral_code = req.referral_code.strip().upper()
 
     if not username or not email or not name or not req.password or not referral_code:
         raise HTTPException(status_code=400, detail="Vui lòng điền đầy đủ tất cả thông tin.")
 
-    if not referral_code.isupper() or len(referral_code) < 3 or " " in referral_code:
-        raise HTTPException(status_code=400, detail="Mã giới thiệu không hợp lệ. Mã giới thiệu phải viết hoa (Ví dụ: NGOCTHANG) và không có khoảng trắng.")
+    if referral_code not in ["NGOCTHANG", "ADMIN"]:
+        raise HTTPException(status_code=400, detail="Mã giảm giá không hợp lệ. Vui lòng nhập NGOCTHANG hoặc ADMIN.")
 
     conn = get_db_connection()
     cur  = get_cursor(conn)
