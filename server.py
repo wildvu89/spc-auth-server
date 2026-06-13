@@ -326,10 +326,26 @@ def register(req: RegisterRequest):
         if cur.fetchone():
             raise HTTPException(status_code=400, detail="Gmail này đã được đăng ký tài khoản.")
 
-        hashed_pwd = hash_password(req.password)
+        # Calculate expiry date based on package
+        now = time.time()
+        duration_days = 0
+        package = req.selected_package
+        if package:
+            package_clean = package.strip().lower()
+            if "tuần" in package_clean or "week" in package_clean:
+                duration_days = 7
+            elif "6 tháng" in package_clean or "6 months" in package_clean:
+                duration_days = 180
+            elif "1 năm" in package_clean or "1 year" in package_clean:
+                duration_days = 365
+            elif "5 năm" in package_clean or "5 years" in package_clean:
+                duration_days = 1825
+
+        expiry_date = now + duration_days * 86400 if duration_days > 0 else None
+
         cur.execute(
-            q("INSERT INTO users (name, email, username, password, referral_code, is_admin, status, selected_package) VALUES (?, ?, ?, ?, ?, 0, 'pending', ?)"),
-            (name, email, username, hashed_pwd, referral_code, req.selected_package)
+            q("INSERT INTO users (name, email, username, password, referral_code, is_admin, status, selected_package, expiry_date) VALUES (?, ?, ?, ?, ?, 0, 'pending', ?, ?)"),
+            (name, email, username, req.password, referral_code, req.selected_package, expiry_date)
         )
         conn.commit()
     finally:
@@ -350,16 +366,6 @@ def login(req: LoginRequest):
         user = cur.fetchone()
         if not user or not verify_password(row_get(user, "password"), req.password):
             raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không chính xác.")
-
-        # Auto-migrate legacy plain text password to hashed format
-        stored_pwd = row_get(user, "password")
-        if not is_sha256(stored_pwd):
-            hashed_pwd = hash_password(req.password)
-            cur.execute(
-                q("UPDATE users SET password = ? WHERE id = ?"),
-                (hashed_pwd, row_get(user, "id"))
-            )
-            conn.commit()
 
         user_id  = row_get(user, "id")
         is_admin = bool(row_get(user, "is_admin", 0))
@@ -434,8 +440,7 @@ def forgot_password(req: ForgotPasswordRequest, request: Request):
         forgot_password_rate_limit[client_ip] = now
 
         new_password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-        hashed_new_pwd = hash_password(new_password)
-        cur.execute(q("UPDATE users SET password = ? WHERE id = ?"), (hashed_new_pwd, row_get(user, "id")))
+        cur.execute(q("UPDATE users SET password = ? WHERE id = ?"), (new_password, row_get(user, "id")))
         conn.commit()
 
         sent = send_password_reset_email(row_get(user, "email"), new_password)
@@ -466,11 +471,14 @@ def admin_list_users(req: ListUsersRequest):
             cur.execute(q("SELECT * FROM devices WHERE user_id = ?"), (row_get(u, "id"),))
             devices = cur.fetchall()
             dev_list = [{"uuid": row_get(d,"uuid"), "cpu": row_get(d,"cpu"), "ram": row_get(d,"ram"), "ip": row_get(d,"ip"), "last_login": row_get(d,"last_login")} for d in devices]
+            pwd_val = row_get(u, "password")
+            if is_sha256(pwd_val):
+                pwd_val = "********"
             user_list.append({
                 "name":             row_get(u, "name"),
                 "email":            row_get(u, "email"),
                 "username":         row_get(u, "username"),
-                "password":         "********",
+                "password":         pwd_val,
                 "referral_code":    row_get(u, "referral_code"),
                 "is_admin":         bool(row_get(u, "is_admin", 0)),
                 "status":           row_get(u, "status", "pending"),
@@ -574,16 +582,36 @@ def admin_set_expiry(req: SetExpiryRequest):
         if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
+        package_name = None
         if req.duration_days <= 0:
             expiry_date = None
+            package_name = "Vĩnh viễn"
             msg = f"Đã cập nhật thời hạn tài khoản '{req.target_username}' thành Vô thời hạn."
         else:
             import datetime
             expiry_date = time.time() + req.duration_days * 86400
             date_str    = datetime.datetime.fromtimestamp(expiry_date).strftime("%d/%m/%Y")
             msg         = f"Đã cập nhật thời hạn tài khoản '{req.target_username}' đến ngày {date_str}."
+            
+            if req.duration_days == 7:
+                package_name = "Dùng thử 1 tuần"
+            elif req.duration_days == 30:
+                package_name = "1 tháng"
+            elif req.duration_days == 90:
+                package_name = "3 tháng"
+            elif req.duration_days == 180:
+                package_name = "6 tháng"
+            elif req.duration_days == 365:
+                package_name = "1 năm"
+            elif req.duration_days == 1825:
+                package_name = "5 năm"
+            else:
+                package_name = f"Gia hạn {req.duration_days} ngày"
 
-        cur.execute(q("UPDATE users SET expiry_date = ? WHERE username = ?"), (expiry_date, req.target_username))
+        cur.execute(
+            q("UPDATE users SET expiry_date = ?, selected_package = ? WHERE username = ?"),
+            (expiry_date, package_name, req.target_username)
+        )
         conn.commit()
     finally:
         cur.close()
@@ -605,8 +633,7 @@ def admin_change_password(req: ChangePasswordRequest):
         if not admin or not verify_password(row_get(admin, "password"), req.admin_pass):
             raise HTTPException(status_code=401, detail="Bạn không có quyền quản trị viên.")
 
-        hashed_pwd = hash_password(req.new_password)
-        cur.execute(q("UPDATE users SET password = ? WHERE username = ?"), (hashed_pwd, req.target_username))
+        cur.execute(q("UPDATE users SET password = ? WHERE username = ?"), (req.new_password, req.target_username))
         conn.commit()
     finally:
         cur.close()
